@@ -1,0 +1,114 @@
+#  Infra pipeline for Spring Boot Application - Assignment
+name: TerraformInfraCode
+
+trigger:
+  branches:
+    include:
+      - fix/*
+      - feature/*
+
+parameters:
+- name: environment
+  displayName: Environment Name
+  type: string
+  default: dev
+  values: 
+    - dev
+    - prd
+    
+- name: appName
+  displayName: Environment Name
+  type: string
+  default: sbappx1
+  
+- name: RunApply
+  displayName: "Run Terraform Apply"
+  type: boolean
+  default: false
+- name: RunDestroy
+  displayName: "Run Terraform Destroy"
+  type: boolean
+  default: false  
+
+variables:
+- name: env
+  value: '${{ parameters.environment }}'
+- name: app
+  value: '${{ parameters.appName }}'
+  
+
+stages:
+- stage: terraformInfraValidate
+  displayName: terraformInfraValidate
+  jobs:
+  - job: Validate      
+    steps:
+      
+      - task: TerraformTaskV4@4
+        displayName: TerraformInit
+        inputs:
+          provider: 'azurerm'
+          command: 'init'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/infra'
+          backendServiceArm: 'serviceConnection'
+          backendAzureRmResourceGroupName: 'app-grp'
+          backendAzureRmStorageAccountName: 'springbootass001'
+          backendAzureRmContainerName: 'statefiles'
+          backendAzureRmKey: 'terraform$(env).tfstate'
+      - task: TerraformTaskV4@4
+        displayName: TerraformValidate
+        inputs:
+          provider: 'azurerm'
+          command: 'validate'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/infra'
+
+- stage: terraformInfraDeployment
+  displayName: "${{ variables.env }}-terraformInfraDeployment"
+  jobs:
+  - deployment: terraformDeployment
+    environment: '$(env)'
+    strategy:
+     runOnce:
+      deploy:
+        steps:
+          - checkout: self
+          - task: TerraformTaskV4@4
+            displayName: TerraformInit
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/infra'
+              backendServiceArm: 'serviceConnection'
+              backendAzureRmResourceGroupName: 'app-grp'
+              backendAzureRmStorageAccountName: 'springbootass001'
+              backendAzureRmContainerName: 'statefiles'
+              backendAzureRmKey: 'terraform$(env).tfstate'
+          
+          - task: TerraformTaskV4@4
+            displayName: TerraformPlan
+            inputs:
+              provider: 'azurerm'
+              command: 'plan'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/infra'
+              commandOptions: '-var env=$(env) -var appName=$(app) -input=false -out=terraform$(env).plan'
+              environmentServiceNameAzureRM: 'serviceConnection'
+              
+          - ${{ if eq(parameters.RunApply, true) }}: 
+            - task: TerraformTaskV4@4
+              displayName: TerraformApply
+              inputs:
+                provider: 'azurerm'
+                command: 'apply'
+                workingDirectory: '$(System.DefaultWorkingDirectory)/infra'
+                commandOptions: '-auto-approve -input=false terraform$(env).plan'
+                environmentServiceNameAzureRM: 'serviceConnection'
+
+          - ${{ if eq(parameters.RunDestroy, true) }}: 
+            - task: TerraformTaskV4@4
+              displayName: TerraformDestroy
+              inputs:
+                provider: 'azurerm'
+                command: 'destroy'
+                commandOptions: '-var env=$(env) -var appName=$(app) -input=false'
+                workingDirectory: '$(System.DefaultWorkingDirectory)/infra'
+                environmentServiceNameAzureRM: 'serviceConnection'

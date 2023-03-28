@@ -1,0 +1,132 @@
+trigger:
+  branches:
+    include:
+      - fix/*
+      - feature/*
+
+parameters:
+- name: environment
+  displayName: Environment Name
+  type: string
+  default: dev
+  values: 
+    - dev
+    - prd
+    
+- name: appName
+  displayName: appName
+  type: string
+  default: sbappx1
+
+
+variables:
+  - name: repoName
+    value: 'acr${{ parameters.appName }}${{ parameters.environment }}'
+  - name: imageName
+    value: 'spring-boot-docker'
+  - name: tag
+    value: '$(Build.BuildId)'
+  - name: env
+    value: '${{ parameters.environment }}'
+
+stages:
+  - stage: BuildStage
+    jobs:
+      - job: MavenaBuild
+        displayName: 'MavenBuild'
+        steps:           
+           - task: Maven@4
+             displayName: 'Maven'
+             inputs:
+               mavenPomFile: '$(Build.SourcesDirectory)/sourceCode/react-and-spring-data-rest/pom.xml'
+               mavenOptions: '-Xmx3072m'
+               goals: 'package'
+               publishJUnitResults: true
+               testResultsFiles: '**/surefire-reports/TEST-*.xml'
+               javaHomeOption: 'JDKVersion'
+               mavenVersionOption: 'Default'
+               mavenAuthenticateFeed: false
+               effectivePomSkip: false
+               sonarQubeRunAnalysis: false
+           - task: CopyFiles@2
+             displayName: 'Copy Docker and K8 Files'
+             inputs:
+               SourceFolder: 'kubernetesManifest'
+               Contents: |
+                **
+               TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+           - task: CopyFiles@2
+             displayName: 'Copy Target Jar files'
+             inputs:
+               SourceFolder: 'sourceCode/react-and-spring-data-rest/target'
+               Contents: |
+                react*
+               TargetFolder: '$(Build.ArtifactStagingDirectory)'    
+
+    
+           - task: PublishBuildArtifacts@1
+             displayName: 'Publish Artifact Source Code'
+             inputs:
+               PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+               ArtifactName: 'source-code'                     
+
+  - stage: AppDeployment
+    displayName: "${{ variables.env }}-AppDeployment"
+    dependsOn: BuildStage
+    jobs:
+      - job: deployImagetoK8
+        displayName: 'deployImagetoK8'
+        steps:
+        
+         - task: DownloadPipelineArtifact@2
+           displayName: 'Download Source Code Artifacts'
+           inputs:
+             buildType: 'current'
+             artifactName: 'source-code'
+             targetPath: '$(System.DefaultWorkingDirectory)'
+         - task: Docker@2
+           displayName: 'DockerBuildandPush'
+           inputs:
+             containerRegistry: 'acrdev'
+             repository: '${{ variables.repoName }}/${{ variables.imageName }}'
+             command: 'buildAndPush'
+             Dockerfile: '$(System.DefaultWorkingDirectory)/Dockerfile'
+             tags: '$(tag)'
+             
+         - task: AzureCLI@2
+           displayName: 'getDockerImageVersion'
+           inputs:
+             azureSubscription: 'serviceConnection'
+             scriptType: 'bash'
+             scriptLocation: 'inlineScript'
+             inlineScript: |
+               az acr login --name ${{ variables.repoName }}
+               docker pull --all-tags ${{ variables.repoName }}.azurecr.io/${{ variables.repoName }}/${{ variables.imageName }}
+               lastBuild=$(docker images ${{ variables.repoName }}.azurecr.io/${{ variables.repoName }}/${{ variables.imageName }} --format "{{.Tag}} {{.CreatedAt}}" | sort -rk 2 | awk 'NR==1{print $1}')
+               echo "Latest version of ${{ variables.imageName }} is $lastBuild"
+               echo "##vso[task.setvariable variable=lastBuild;]$lastBuild" 
+         - task: Bash@3
+           displayName: UpdatingImageVersion
+           inputs:
+             targetType: 'inline'
+             script: |
+               echo ${{ variables.repoName }}.azurecr.io/${{ variables.repoName }}/${{ variables.imageName }}:$(lastBuild)
+               updatedImage=${{ variables.repoName }}.azurecr.io/${{ variables.repoName }}/${{ variables.imageName }}:$(lastBuild)
+               sed -i "s|ImageName|${updatedImage}|g" springboot-deployment.yaml
+               cat springboot-deployment.yaml
+
+         - task: AzureCLI@2
+           displayName: 'KubernetesDeployment'
+           inputs:
+             azureSubscription: 'serviceConnection'
+             scriptType: 'bash'
+             scriptLocation: 'inlineScript'
+             inlineScript: |
+               az aks get-credentials --resource-group rg-${{ parameters.appName }}-${{ parameters.environment }} --name aks-${{ parameters.appName }}-${{ parameters.environment }}
+               kubectl apply -f springboot-namespace.yaml
+               kubectl apply -f springboot-services.yaml
+               kubectl apply -f springboot-deployment.yaml
+               
+                  
+
